@@ -9,6 +9,7 @@ Currently supported files are:
 - JPG
 - PNG
 - ZIP (includes .docx, .xlsx, .pptx)
+- PDF
 
 # Usage
 

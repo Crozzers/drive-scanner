@@ -25,6 +25,9 @@ JPG_END_SIG = b'\xff\xd9'
 ZIP_OPEN_SIG = b'\x50\x4b\x03\x04'
 ZIP_END_SIG = b'\x50\x4b\x05\x06'
 
+PDF_OPEN_SIG = b'%PDF-'
+PDF_END_SIG = b'%%EOF'
+
 CHUNK_SIZE = 1024
 LAST_INDEX_WRITE = -1
 LAST_FILE_SAVE_INDEX = -1
@@ -136,6 +139,37 @@ def parse_zip(f: BufferedReader, file_start: int):
     return -1
 
 
+def parse_pdf(f: BufferedReader, file_start: int):
+    pdf_offset = file_start + len(PDF_OPEN_SIG) - 1
+    f.seek(pdf_offset)
+    chunk = f.read(len(PDF_END_SIG) * 2)
+
+    nested_count = 1
+
+    while pdf_offset - file_start < 10_000_000:
+        start_index = chunk.find(PDF_OPEN_SIG)
+        end_index = chunk.find(PDF_END_SIG)
+        if start_index > -1 and end_index > -1:
+            if nested_count == 1 and end_index < start_index:
+                # if the next start is outside of the current PDF being closed completely
+                nested_count -= 1
+            else:
+                # otherwise, +=1 and -=1 to the nested index
+                pass
+        elif start_index > -1:
+            nested_count += 1
+        elif end_index > -1:
+            nested_count -= 1
+
+        if nested_count == 0:
+            return pdf_offset + end_index + len(PDF_END_SIG)
+
+        chunk = chunk[len(PDF_END_SIG):] + f.read(len(PDF_END_SIG))
+        pdf_offset = f.tell() - len(PDF_END_SIG)
+
+    return -1
+
+
 def save_index(files):
     with open('index.txt', 'w') as f:
         for file_start, file_end, file_type in files:
@@ -159,7 +193,7 @@ def load_index():
     return sorted(files, key=lambda f: f[0])
 
 
-def image_is_valid(contents: bytes, index):
+def image_is_valid(contents: bytes, index: int):
     try:
         img = Image.open(BytesIO(contents))
         # filter out invalid/corrupt files
@@ -188,6 +222,22 @@ def zip_is_valid(contents: bytes, index: int):
     return True
 
 
+def pdf_is_valid(contents: bytes, index: int):
+    try:
+        import pypdf
+    except (ImportError, ModuleNotFoundError) as e:
+        print(f'{index}: failed to import PDF parsing lib, cannot validate file: e')
+        raise
+        return False
+
+    try:
+        pypdf.PdfReader(BytesIO(contents))
+    except Exception as e:
+        print(f'{index}: invalid pdf: {e}')
+        return False
+    return True
+
+
 def save_files(files, f: Optional[BufferedReader] = None):
     save_index(files)
 
@@ -208,6 +258,10 @@ def save_files(files, f: Optional[BufferedReader] = None):
                     or (
                         file_type in ('png', 'jpg')
                         and image_is_valid(contents, index)
+                    )
+                    or (
+                        file_type == 'pdf'
+                        and pdf_is_valid(contents, index)
                     )
             ):
                 folder = f'recovered/{file_type}'
@@ -311,13 +365,23 @@ if __name__ == '__main__':
                 index = buf.find(ZIP_OPEN_SIG)
                 if index > -1:
                     file_start = offset + index
-                    file_type = 'zip'
                     file_end = parse_zip(f, file_start)
                     if file_end == -1:
                         print(f'Error parsing ZIP file at offset {file_start}')
                     else:
                         print(f'ZIP found - Index: {file_start, file_end}, Size: {file_end - file_start:,}')
                         files.append((file_start, file_end, 'zip'))
+                        continue
+
+                index = buf.find(PDF_OPEN_SIG)
+                if index > -1:
+                    file_start = offset + index
+                    file_end = parse_pdf(f, file_start)
+                    if file_end == -1:
+                        print(f'Error parsing PDF at offset {file_start}')
+                    else:
+                        print(f'PDF found - Index: {file_start, file_end}, Size: {file_end - file_start:,}')
+                        files.append((file_start, file_end, 'pdf'))
                         continue
 
                 for marker in (JPG_OPEN_SIG1, JPG_OPEN_SIG2, JPG_OPEN_SIG3, JPG_OPEN_SIG4):
@@ -344,7 +408,6 @@ if __name__ == '__main__':
                 index = buf.find(PNG_OPEN_SIG)
                 if index > -1:
                     file_start = offset + index
-                    file_type = 'png'
                     file_end = parse_png(f, file_start)
 
                     if file_end != -1:
